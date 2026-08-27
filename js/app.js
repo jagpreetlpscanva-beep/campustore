@@ -11,10 +11,76 @@ const AppState = {
   cart: JSON.parse(localStorage.getItem('store_cart') || '[]'),
   user: JSON.parse(localStorage.getItem('store_user') || 'null'),
   discountCode: '',
-  discountPercent: 0,
+  discountPercent: 0,   // kept for backward compatibility; use discountType/discountValue below
+  discountType: null,   // 'percentage' | 'fixed' | null
+  discountValue: 0,
   selectedPaymentMethod: 'upi',
   lastOrder: null
 };
+
+// Computes the rupee discount amount for a given subtotal based on the
+// currently applied promo code (percentage or fixed), or 0 if none applied.
+function computeDiscountAmount(subtotal) {
+  if (!AppState.discountType) return 0;
+  if (AppState.discountType === 'percentage') {
+    return Math.round((subtotal * AppState.discountValue) / 100);
+  }
+  return Math.min(subtotal, AppState.discountValue);
+}
+
+// Validates a promo code against the backend and applies it to AppState.
+function applyPromoCode() {
+  const input = document.getElementById('promoCodeInput');
+  const msgEl = document.getElementById('promoCodeMsg');
+  const code = input ? input.value.trim().toUpperCase() : '';
+
+  if (!code) {
+    showToast('Enter a promo code first', 'warning');
+    return;
+  }
+
+  const subtotal = AppState.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
+
+  fetch('/api/discounts/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, subtotal })
+  })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok || !data.valid) {
+        AppState.discountType = null;
+        AppState.discountValue = 0;
+        AppState.discountCode = '';
+        AppState.discountPercent = 0;
+        if (msgEl) {
+          msgEl.textContent = data.message || 'Invalid discount code.';
+          msgEl.style.color = '#ef4444';
+          msgEl.style.display = 'block';
+        }
+        updateCartUI();
+        return;
+      }
+      AppState.discountType = data.type;
+      AppState.discountValue = data.value;
+      AppState.discountCode = data.code;
+      AppState.discountPercent = data.type === 'percentage' ? data.value : 0;
+      if (msgEl) {
+        msgEl.textContent = `"${data.code}" applied — you saved ₹${data.discount_amount}!`;
+        msgEl.style.color = '#10b981';
+        msgEl.style.display = 'block';
+      }
+      showToast(`Promo code "${data.code}" applied!`, 'info');
+      updateCartUI();
+    })
+    .catch(() => {
+      if (msgEl) {
+        msgEl.textContent = 'Could not validate code right now. Please try again.';
+        msgEl.style.color = '#ef4444';
+        msgEl.style.display = 'block';
+      }
+    });
+}
 
 // DOM Ready Initialization
 document.addEventListener('DOMContentLoaded', () => {
@@ -407,11 +473,11 @@ function updateCartUI() {
   `).join('');
 
   const subtotal = AppState.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-  const discount = Math.round((subtotal * AppState.discountPercent) / 100);
+  const discount = computeDiscountAmount(subtotal);
   const total = Math.max(0, subtotal - discount);
 
   if (subtotalEl) subtotalEl.textContent = `₹${subtotal}`;
-  if (discountEl) discountEl.textContent = discount > 0 ? `-₹${discount} (${AppState.discountPercent}%)` : '₹0';
+  if (discountEl) discountEl.textContent = discount > 0 ? `-₹${discount}${AppState.discountCode ? ' (' + AppState.discountCode + ')' : ''}` : '₹0';
   if (totalEl) totalEl.textContent = `₹${total}`;
 }
 
@@ -593,7 +659,7 @@ function renderCheckoutStep1() {
   if (!container) return;
 
   const subtotal = AppState.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-  const discount = Math.round((subtotal * AppState.discountPercent) / 100);
+  const discount = computeDiscountAmount(subtotal);
   const total = Math.max(0, subtotal - discount);
 
   const defaultName = AppState.user ? AppState.user.name : '';
@@ -721,7 +787,7 @@ function renderCheckoutStep2() {
   if (!container) return;
 
   const subtotal = AppState.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-  const discount = Math.round((subtotal * AppState.discountPercent) / 100);
+  const discount = computeDiscountAmount(subtotal);
   const total = Math.max(0, subtotal - discount);
 
   const gpayId = PAYMENT_INFO.upi.gpay;
@@ -871,7 +937,7 @@ function handleFinalPaymentSubmit(e) {
   }
 
   const subtotal = AppState.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
-  const discount = Math.round((subtotal * AppState.discountPercent) / 100);
+  const discount = computeDiscountAmount(subtotal);
   const total = Math.max(0, subtotal - discount);
 
   const orderId = 'ORD-' + Math.floor(100000 + Math.random() * 900000);
